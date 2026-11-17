@@ -96,6 +96,12 @@ class Match(db.Model):
     successor = db.Column(db.Integer, db.ForeignKey('match.id'), nullable=True)
     bracket_position = db.Column(db.Integer, nullable=True)
     round_number = db.Column(db.Integer, nullable=True)
+    # How a finished match was decided. `status` is the lifecycle; `outcome` is the result type.
+    # Valid values and their rules live in match_outcomes.py (see migrations/v2/add_match_outcome.sql).
+    outcome = db.Column(db.String(20), nullable=False, default='normal', server_default='normal')
+    outcome_reason = db.Column(db.String(255), nullable=True)
+    outcome_decided_by = db.Column(db.String(100), nullable=True)
+    outcome_decided_at = db.Column(db.DateTime, nullable=True)
 
 class Score(db.Model):
     id = db.Column(db.Integer, primary_key=True)
