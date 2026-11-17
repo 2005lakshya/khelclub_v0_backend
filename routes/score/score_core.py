@@ -4,6 +4,7 @@ from models import Score, Match, db, Player, Team
 from . import score_bp
 from socket_instance import socketio
 from flask_cors import cross_origin
+from match_outcomes import get_rule, describe_outcome
 
 def update_successor_match(successor_match_id, current_match_id, winning_team_id):
     """Updates the successor match with the winning team"""
@@ -73,6 +74,14 @@ def update_score():
             return jsonify({'error': 'Match not found'}), 404
 
         print(f"Found match with team1_id={match.team1_id}, team2_id={match.team2_id}")
+
+        # Matches decided without play (e.g. walkover) have no rally scores to enter
+        rule = get_rule(match.outcome)
+        if not rule.accepts_scores:
+            return jsonify({
+                'error': f'Match was decided by {rule.label.lower()}; scores cannot be entered',
+                'outcome': rule.describe(match)
+            }), 409
 
         # First, check if scores exist, if not create them
         team1_score_record = Score.query.filter_by(
@@ -274,9 +283,10 @@ def get_match_score():
             },
             'status': match.status,
             'is_final': match.is_final,
-            'winner_team_id': match.winner_team_id
+            'winner_team_id': match.winner_team_id,
+            'outcome': describe_outcome(match)
         }
-        
+
         return jsonify(response), 200
         
     except Exception as e:

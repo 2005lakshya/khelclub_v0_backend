@@ -47,6 +47,9 @@ def create_round():
     if num_of_top_teams_to_promote:
         # Call the cumulative points API to get the top teams
         standings_response = get_cumulative_points_for_round(tournament_id)
+        # The helper returns (response, status); calling .get_json() on the tuple used to crash
+        if isinstance(standings_response, tuple):
+            standings_response = standings_response[0]
         standings_data = standings_response.get_json()
 
         # Get the top `num_of_top_teams_to_promote` teams

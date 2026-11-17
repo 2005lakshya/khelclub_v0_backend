@@ -4,6 +4,7 @@ from sqlalchemy import text
 from datetime import datetime
 import csv
 import io
+from match_outcomes import get_rule
 from . import tournament_bp
 
 @tournament_bp.route('/export-tournament-csv', methods=['GET'])
@@ -43,6 +44,8 @@ def export_tournament_csv():
         for match in matches:
             if not match.is_final:
                 continue  # Skip matches that are not finalized
+            if not get_rule(match.outcome).accepts_scores:
+                continue  # Skip matches decided without play (e.g. walkover): no games to rate
 
             # Fetch teams for each match
             team1 = Team.query.filter_by(team_id=match.team1_id).first()

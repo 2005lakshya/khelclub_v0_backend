@@ -1,6 +1,7 @@
 from flask import request, jsonify, current_app, render_template
 from models import Tournament, Team, Player, Match, Score, Round, db, Season
 from sqlalchemy import text, or_, and_, func, case, distinct
+from standings import TeamStats, compute_team_stats, load_match_entries
 from . import tournament_bp
 
 @tournament_bp.route('/tournaments', methods=['POST'])
@@ -123,76 +124,10 @@ def show_standings(tournament_id):
     print("\n=== Starting show_standings endpoint ===")
     print(f"Getting standings for tournament_id={tournament_id}")
 
-    # Get all match scores using direct SQL for better control
-    score_sql = text("""
-        SELECT 
-            m.id as match_id,
-            m.team1_id,
-            m.team2_id,
-            m.round_id,
-            m.pool,
-            s1.team_id as team1_id,
-            s1.score as team1_score,
-            s2.team_id as team2_id,
-            s2.score as team2_score
-        FROM `match` m
-        JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
-        JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
-        WHERE m.tournament_id = :tournament_id
-    """)
-
-    matches = db.session.execute(
-        score_sql,
-        {'tournament_id': tournament_id}
-    ).fetchall()
-    
-    print(f"Found {len(matches)} matches")
-    
-    # Create a dictionary to store scores by team and round
-    team_scores = {}
-    
-    # Process all matches
-    for match in matches:
-        round_id = match.round_id
-        if round_id not in team_scores:
-            team_scores[round_id] = {}
-            
-        # Initialize team data if not exists
-        for team_id in [match.team1_id, match.team2_id]:
-            if team_id not in team_scores[round_id]:
-                team_scores[round_id][team_id] = {
-                    'points_scored': 0,
-                    'points_lost': 0,
-                    'matches': set(),
-                    'matches_won': 0
-                }
-        
-        print(f"\nProcessing match {match.match_id}:")
-        print(f"Team1 ({match.team1_id}): {match.team1_score}")
-        print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
-        # Add scores
-        team_scores[round_id][match.team1_id]['points_scored'] += match.team1_score
-        team_scores[round_id][match.team1_id]['points_lost'] += match.team2_score
-        team_scores[round_id][match.team2_id]['points_scored'] += match.team2_score
-        team_scores[round_id][match.team2_id]['points_lost'] += match.team1_score
-        
-        # Track match and determine winner
-        if match.team1_score == 0 and match.team2_score == 0:
-            print("Match not played yet")
-            continue
-            
-        team_scores[round_id][match.team1_id]['matches'].add(match.match_id)
-        team_scores[round_id][match.team2_id]['matches'].add(match.match_id)
-        
-        if match.team1_score > match.team2_score:
-            team_scores[round_id][match.team1_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team1_id}")
-        elif match.team2_score > match.team1_score:
-            team_scores[round_id][match.team2_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team2_id}")
-        else:
-            print("Match tied or not completed")
+    # Wins and points per round, decided by the shared outcome rules
+    entries = load_match_entries(tournament_id)
+    print(f"Found {len(entries)} matches")
+    team_scores = compute_team_stats(entries, group_by=lambda m: str(m.round_id))
 
     # Get teams by pool and round
     print("\n=== Getting teams from matches ===")
@@ -245,17 +180,12 @@ def show_standings(tournament_id):
             standings_by_round[round_id]['pools'][pool] = []
             
         # Get team's scores for this round
-        team_data = team_scores.get(str(round_id), {}).get(team.team_id, {
-            'points_scored': 0,
-            'points_lost': 0,
-            'matches': set(),
-            'matches_won': 0
-        })
-        
-        matches_played = len(team_data['matches'])
-        matches_won = team_data['matches_won']
-        points_scored = team_data['points_scored']
-        points_lost = team_data['points_lost']
+        team_data = team_scores.get(str(round_id), {}).get(team.team_id) or TeamStats(team.team_id)
+
+        matches_played = len(team_data.matches_played)
+        matches_won = team_data.matches_won
+        points_scored = team_data.points_scored
+        points_lost = team_data.points_lost
         
         print(f"\nTeam {team.team_id} stats:")
         print(f"Matches played: {matches_played}")
@@ -299,71 +229,10 @@ def show_overall_standings(tournament_id):
     print("\n=== Starting show_overall_standings endpoint ===")
     print(f"Getting overall standings for tournament_id={tournament_id}")
 
-    # Get all match scores using direct SQL
-    score_sql = text("""
-        SELECT 
-            m.id as match_id,
-            m.team1_id,
-            m.team2_id,
-            s1.team_id as team1_id,
-            s1.score as team1_score,
-            s2.team_id as team2_id,
-            s2.score as team2_score
-        FROM `match` m
-        JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
-        JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
-        WHERE m.tournament_id = :tournament_id
-    """)
-
-    matches = db.session.execute(
-        score_sql,
-        {'tournament_id': tournament_id}
-    ).fetchall()
-    
-    print(f"Found {len(matches)} matches")
-    
-    # Create a dictionary to store overall scores by team
-    team_scores = {}
-    
-    # Process all matches
-    for match in matches:
-        # Initialize team data if not exists
-        for team_id in [match.team1_id, match.team2_id]:
-            if team_id not in team_scores:
-                team_scores[team_id] = {
-                    'points_scored': 0,
-                    'points_lost': 0,
-                    'matches': set(),
-                    'matches_won': 0
-                }
-        
-        print(f"\nProcessing match {match.match_id}:")
-        print(f"Team1 ({match.team1_id}): {match.team1_score}")
-        print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
-        # Skip unplayed matches
-        if match.team1_score == 0 and match.team2_score == 0:
-            print("Match not played yet")
-            continue
-        
-        # Add scores
-        team_scores[match.team1_id]['points_scored'] += match.team1_score
-        team_scores[match.team1_id]['points_lost'] += match.team2_score
-        team_scores[match.team2_id]['points_scored'] += match.team2_score
-        team_scores[match.team2_id]['points_lost'] += match.team1_score
-        
-        # Track match and determine winner
-        team_scores[match.team1_id]['matches'].add(match.match_id)
-        team_scores[match.team2_id]['matches'].add(match.match_id)
-        
-        if match.team1_score > match.team2_score:
-            team_scores[match.team1_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team1_id}")
-        elif match.team2_score > match.team1_score:
-            team_scores[match.team2_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team2_id}")
-        else:
-            print("Match tied or not completed")
+    # Overall wins and points, decided by the shared outcome rules
+    entries = load_match_entries(tournament_id)
+    print(f"Found {len(entries)} matches")
+    team_scores = compute_team_stats(entries).get(None, {})
 
     # Get all teams and their players
     teams_query = text("""
@@ -400,17 +269,12 @@ def show_overall_standings(tournament_id):
     
     for team in teams:
         # Get team's overall scores
-        team_data = team_scores.get(team.team_id, {
-            'points_scored': 0,
-            'points_lost': 0,
-            'matches': set(),
-            'matches_won': 0
-        })
-        
-        matches_played = len(team_data['matches'])
-        matches_won = team_data['matches_won']
-        points_scored = team_data['points_scored']
-        points_lost = team_data['points_lost']
+        team_data = team_scores.get(team.team_id) or TeamStats(team.team_id)
+
+        matches_played = len(team_data.matches_played)
+        matches_won = team_data.matches_won
+        points_scored = team_data.points_scored
+        points_lost = team_data.points_lost
         
         # Get player names from lookup
         player_names = []
@@ -496,78 +360,10 @@ def show_second_place_standings(tournament_id):
     print("\n=== Starting show_second_place_standings endpoint ===")
     print(f"Getting second place standings for tournament_id={tournament_id}")
 
-    # Get all match scores using direct SQL for better control - only for round_id=1
-    score_sql = text("""
-        SELECT 
-            m.id as match_id,
-            m.team1_id,
-            m.team2_id,
-            m.round_id,
-            m.pool,
-            s1.team_id as team1_id,
-            s1.score as team1_score,
-            s2.team_id as team2_id,
-            s2.score as team2_score
-        FROM `match` m
-        JOIN score s1 ON s1.match_id = m.id AND s1.team_id = m.team1_id
-        JOIN score s2 ON s2.match_id = m.id AND s2.team_id = m.team2_id
-        WHERE m.tournament_id = :tournament_id
-        AND m.round_id = '1'  -- Only consider round robin matches
-    """)
-
-    matches = db.session.execute(
-        score_sql,
-        {'tournament_id': tournament_id}
-    ).fetchall()
-    
-    print(f"Found {len(matches)} matches in round robin")
-    
-    # Create a dictionary to store scores by pool
-    pool_scores = {}  # {pool: {team_id: stats}}
-    
-    # Process all matches
-    for match in matches:
-        pool = match.pool
-        
-        if pool not in pool_scores:
-            pool_scores[pool] = {}
-            
-        # Initialize team data if not exists
-        for team_id in [match.team1_id, match.team2_id]:
-            if team_id not in pool_scores[pool]:
-                pool_scores[pool][team_id] = {
-                    'points_scored': 0,
-                    'points_lost': 0,
-                    'matches': set(),
-                    'matches_won': 0
-                }
-        
-        print(f"\nProcessing match {match.match_id}:")
-        print(f"Team1 ({match.team1_id}): {match.team1_score}")
-        print(f"Team2 ({match.team2_id}): {match.team2_score}")
-        
-        # Add scores
-        pool_scores[pool][match.team1_id]['points_scored'] += match.team1_score
-        pool_scores[pool][match.team1_id]['points_lost'] += match.team2_score
-        pool_scores[pool][match.team2_id]['points_scored'] += match.team2_score
-        pool_scores[pool][match.team2_id]['points_lost'] += match.team1_score
-        
-        # Track match and determine winner
-        if match.team1_score == 0 and match.team2_score == 0:
-            print("Match not played yet")
-            continue
-            
-        pool_scores[pool][match.team1_id]['matches'].add(match.match_id)
-        pool_scores[pool][match.team2_id]['matches'].add(match.match_id)
-        
-        if match.team1_score > match.team2_score:
-            pool_scores[pool][match.team1_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team1_id}")
-        elif match.team2_score > match.team1_score:
-            pool_scores[pool][match.team2_id]['matches_won'] += 1
-            print(f"Winner: Team {match.team2_id}")
-        else:
-            print("Match tied or not completed")
+    # Round robin (round 1) wins and points per pool, decided by the shared outcome rules
+    entries = load_match_entries(tournament_id, round_id='1')
+    print(f"Found {len(entries)} matches in round robin")
+    pool_scores = compute_team_stats(entries, group_by=lambda m: m.pool)  # {pool: {team_id: stats}}
 
     # Get teams by pool for round 1
     print("\n=== Getting teams from round robin ===")
@@ -615,17 +411,12 @@ def show_second_place_standings(tournament_id):
             continue
             
         # Get team's scores for this pool
-        team_data = pool_scores[pool].get(team.team_id, {
-            'points_scored': 0,
-            'points_lost': 0,
-            'matches': set(),
-            'matches_won': 0
-        })
-        
-        matches_played = len(team_data['matches'])
-        matches_won = team_data['matches_won']
-        points_scored = team_data['points_scored']
-        points_lost = team_data['points_lost']
+        team_data = pool_scores[pool].get(team.team_id) or TeamStats(team.team_id)
+
+        matches_played = len(team_data.matches_played)
+        matches_won = team_data.matches_won
+        points_scored = team_data.points_scored
+        points_lost = team_data.points_lost
         
         # Get player names from lookup
         player_names = []
