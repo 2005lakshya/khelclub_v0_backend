@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from models import Tournament, Team, Player, Match, Score, Round, db
 from routes.tournament.tournament_core import show_standings
+from standings import ZERO_MISSING_SCORES, compute_team_stats, load_match_entries
 from . import round_bp
 
 def get_round_standings(tournament_id, round_id):
@@ -8,60 +9,25 @@ def get_round_standings(tournament_id, round_id):
     Get standings for a specific round in a tournament.
     """
     try:
-        # Get all matches for the round
-        matches = Match.query.filter_by(
-            tournament_id=tournament_id,
-            round_id=round_id
-        ).all()
+        # Wins and points per pool, decided by the shared outcome rules
+        entries = load_match_entries(tournament_id, round_id=round_id)
+        stats_by_pool = compute_team_stats(entries, group_by=lambda m: m.pool)
 
-        # Get all scores for these matches
-        match_ids = [match.id for match in matches]
-        scores = Score.query.filter(
-            Score.match_id.in_(match_ids),
-            Score.tournament_id == tournament_id
-        ).all()
-
-        # Organize scores by pool
         pool_standings = {}
-        for match in matches:
-            if match.pool not in pool_standings:
-                pool_standings[match.pool] = {}
-
-            # Get scores for this match
-            match_scores = [s for s in scores if s.match_id == match.id]
-            
-            for score in match_scores:
-                if score.team_id not in pool_standings[match.pool]:
-                    team = Team.query.get(score.team_id)
-                    pool_standings[match.pool][score.team_id] = {
-                        'team_id': score.team_id,
-                        'name': team.name if team else 'Unknown',
-                        'total_scores': 0,
-                        'points_scored': 0,
-                        'points_lost': 0,
-                        'points_difference': 0,
-                        'matches_played': set(),
-                        'matches_won': 0
-                    }
-
-                team_stats = pool_standings[match.pool][score.team_id]
-                team_stats['points_scored'] += score.score
-                team_stats['matches_played'].add(match.id)
-
-                # Find opponent's score
-                opponent_score = next(
-                    (s for s in match_scores if s.team_id != score.team_id),
-                    None
-                )
-                if opponent_score:
-                    team_stats['points_lost'] += opponent_score.score
-                    if score.score > opponent_score.score:
-                        team_stats['matches_won'] += 1
-
-                team_stats['total_scores'] = team_stats['matches_won']
-                team_stats['points_difference'] = (
-                    team_stats['points_scored'] - team_stats['points_lost']
-                )
+        for pool, teams in stats_by_pool.items():
+            pool_standings[pool] = {}
+            for team_id, stats in teams.items():
+                team = Team.query.get(team_id)
+                pool_standings[pool][team_id] = {
+                    'team_id': team_id,
+                    'name': team.name if team else 'Unknown',
+                    'total_scores': stats.matches_won,
+                    'points_scored': stats.points_scored,
+                    'points_lost': stats.points_lost,
+                    'points_difference': stats.points_difference,
+                    'matches_played': stats.matches_scheduled,
+                    'matches_won': stats.matches_won
+                }
 
         # Convert to list format for each pool
         result = {
@@ -362,22 +328,13 @@ def complete_round2():
         if not matches:
             return jsonify({'error': f'No matches found for round {round_id}'}), 404
 
-        # Get all scores for these matches
-        match_ids = [match.id for match in matches]
-        scores = Score.query.filter(Score.match_id.in_(match_ids)).all()
-
-        # Create a dictionary to store team scores by pool
-        pool_scores = {}
-        for match in matches:
-            if match.pool not in pool_scores:
-                pool_scores[match.pool] = {}
-
-            # Get scores for this match
-            match_scores = [s for s in scores if s.match_id == match.id]
-            for score in match_scores:
-                if score.team_id not in pool_scores[match.pool]:
-                    pool_scores[match.pool][score.team_id] = 0
-                pool_scores[match.pool][score.team_id] += score.score
+        # Points scored per team per pool, decided by the shared outcome rules
+        entries = load_match_entries(tournament_id, round_id=round_id,
+                                     missing_scores=ZERO_MISSING_SCORES)
+        pool_scores = {
+            pool: {team_id: stats.points_scored for team_id, stats in teams.items()}
+            for pool, teams in compute_team_stats(entries, group_by=lambda m: m.pool).items()
+        }
 
         # Sort teams by score in each pool and get top teams
         promoted_teams = []

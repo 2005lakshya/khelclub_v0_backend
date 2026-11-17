@@ -3,6 +3,7 @@ from models import db, Tournament, Match, Team, Score, Round
 from sqlalchemy import func
 from . import round_bp
 from flask_cors import cross_origin
+from standings import ZERO_MISSING_SCORES, compute_team_stats, load_match_entries
 import csv
 import io
 import math
@@ -13,17 +14,13 @@ def is_power_of_two(n):
 def get_pool_standings(tournament_id, round_id):
     """Get standings for each pool"""
     pool_standings = {}
-    
-    # Get all matches for the round
-    matches = Match.query.filter_by(
-        tournament_id=tournament_id,
-        round_id=str(round_id)
-    ).all()
-    
-    # Get all scores for these matches
-    match_ids = [match.id for match in matches]
-    scores = Score.query.filter(Score.match_id.in_(match_ids)).all()
-    
+
+    # Wins and points per team, decided by the shared outcome rules
+    entries = load_match_entries(tournament_id, round_id=round_id,
+                                 missing_scores=ZERO_MISSING_SCORES)
+    entries = [e for e in entries if e[0].team1_id and e[0].team2_id]  # both slots filled
+    stats_by_pool = compute_team_stats(entries, group_by=lambda m: (m.pool or '').strip())
+
     # Get all teams in each pool
     pools = db.session.query(Round.pool, Round.team_id).filter_by(
         tournament_id=tournament_id,
@@ -48,29 +45,18 @@ def get_pool_standings(tournament_id, round_id):
                 'points_against': 0
             }
     
-    # Calculate standings
-    for match in matches:
-        team1_score = next((s.score for s in scores if s.match_id == match.id and s.team_id == match.team1_id), 0)
-        team2_score = next((s.score for s in scores if s.match_id == match.id and s.team_id == match.team2_id), 0)
-        
-        if match.team1_id and match.team2_id:  # Only count completed matches
-            pool = match.pool.strip()  # Clean pool name
-            # Update team 1 stats
-            if match.team1_id in pool_standings.get(pool, {}):
-                pool_standings[pool][match.team1_id]['matches_played'] += 1
-                pool_standings[pool][match.team1_id]['points_scored'] += team1_score
-                pool_standings[pool][match.team1_id]['points_against'] += team2_score
-                if team1_score > team2_score:
-                    pool_standings[pool][match.team1_id]['matches_won'] += 1
-                
-            # Update team 2 stats
-            if match.team2_id in pool_standings.get(pool, {}):
-                pool_standings[pool][match.team2_id]['matches_played'] += 1
-                pool_standings[pool][match.team2_id]['points_scored'] += team2_score
-                pool_standings[pool][match.team2_id]['points_against'] += team1_score
-                if team2_score > team1_score:
-                    pool_standings[pool][match.team2_id]['matches_won'] += 1
-    
+    # Fill in stats for teams that belong to each pool in this round
+    for pool, teams in pool_standings.items():
+        for team_id, row in teams.items():
+            stats = stats_by_pool.get(pool, {}).get(team_id)
+            if not stats:
+                continue
+            # matches_played keeps its original meaning here: every scheduled match
+            row['matches_played'] = len(stats.matches_scheduled)
+            row['matches_won'] = stats.matches_won
+            row['points_scored'] = stats.points_scored
+            row['points_against'] = stats.points_lost
+
     return pool_standings
 
 @round_bp.route('/knockout-top-teams', methods=['GET'])
